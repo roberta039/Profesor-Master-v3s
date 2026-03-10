@@ -146,59 +146,209 @@ def render_matplotlib(code: str, dark_mode: bool = False) -> bool:
 # 2. MERMAID
 # ════════════════════════════════════════════════════════════
 
-# Template HTML care încarcă Mermaid.js din CDN și randează diagrama
-_MERMAID_HTML = """
-<!DOCTYPE html>
+# Mapă completă diacritice + simboluri matematice → ASCII safe pentru Mermaid
+_MERMAID_CHAR_MAP = {
+    # Diacritice românești
+    "ă": "a", "â": "a", "î": "i", "ș": "s", "ț": "t",
+    "Ă": "A", "Â": "A", "Î": "I", "Ș": "S", "Ț": "T",
+    # Diacritice comune europene
+    "ä": "a", "ö": "o", "ü": "u", "ß": "ss",
+    "é": "e", "è": "e", "ê": "e", "ë": "e",
+    "à": "a", "á": "a", "ã": "a",
+    "ï": "i", "í": "i", "ì": "i",
+    "ó": "o", "ò": "o", "õ": "o", "ô": "o",
+    "ú": "u", "ù": "u", "û": "u",
+    "ç": "c", "ñ": "n",
+    # Litere grecești
+    "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta",
+    "ε": "epsilon", "ζ": "zeta", "η": "eta", "θ": "theta",
+    "λ": "lambda", "μ": "mu", "ν": "nu", "π": "pi",
+    "ρ": "rho", "σ": "sigma", "τ": "tau", "φ": "phi",
+    "ω": "omega", "Δ": "Delta", "Σ": "Sigma", "Ω": "Omega",
+    "Π": "Pi", "Λ": "Lambda", "Γ": "Gamma", "Θ": "Theta",
+    # Simboluri matematice
+    "²": "^2", "³": "^3", "⁴": "^4", "⁵": "^5",
+    "⁰": "^0", "¹": "^1", "⁶": "^6", "⁷": "^7", "⁸": "^8", "⁹": "^9",
+    "₀": "_0", "₁": "_1", "₂": "_2", "₃": "_3", "₄": "_4",
+    "₅": "_5", "₆": "_6", "₇": "_7", "₈": "_8", "₉": "_9",
+    "√": "sqrt", "∛": "cbrt", "∞": "inf",
+    "±": "+/-", "×": "x", "÷": "/", "≠": "!=",
+    "≤": "<=", "≥": ">=", "≈": "~=", "≡": "===",
+    "∈": "in", "∉": "not in", "⊂": "subset",
+    "∑": "sum", "∏": "prod", "∫": "integral",
+    "→": "->", "←": "<-", "↔": "<->",
+    "⇒": "=>", "⇐": "<=", "⇔": "<=>",
+    "∧": "AND", "∨": "OR", "¬": "NOT",
+    # Ghilimele și apostrofuri speciale
+    "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'",
+    "\u00ab": '"', "\u00bb": '"',
+    # Liniuțe speciale
+    "\u2013": "-", "\u2014": "-", "\u2015": "-",
+    # Alte simboluri
+    "\u00b0": " grade", "\u00b5": "mu", "\u2022": "*",
+}
+
+
+def _sanitize_mermaid(code: str) -> str:
+    """
+    Sanitizează codul Mermaid pentru a preveni syntax errors:
+    1. Înlocuiește diacritice și simboluri matematice cu echivalente ASCII
+       NUMAI în etichete de noduri (nu în cuvintele cheie Mermaid)
+    2. Citează automat etichetele care conțin caractere problematice
+    3. Păstrează intactă structura sintactică Mermaid
+    """
+    # Cuvinte cheie Mermaid care NU trebuie atinse
+    MERMAID_KEYWORDS = {
+        "flowchart", "graph", "sequenceDiagram", "classDiagram", "erDiagram",
+        "gantt", "pie", "timeline", "mindmap", "gitGraph", "stateDiagram",
+        "TD", "LR", "TB", "BT", "RL",
+        "participant", "actor", "activate", "deactivate", "loop", "alt",
+        "opt", "par", "break", "rect", "Note", "note",
+        "class", "interface", "abstract", "enum", "relationship",
+        "title", "section", "dateFormat", "axisFormat",
+        "subgraph", "end", "direction", "style", "linkStyle",
+        "classDef", "click", "callback",
+    }
+
+    lines_out = []
+    for line in code.split("\n"):
+        stripped = line.lstrip()
+        # Sari peste linii care sunt pur cuvinte cheie sau comentarii
+        first_word = stripped.split()[0] if stripped.split() else ""
+        if first_word in MERMAID_KEYWORDS or stripped.startswith("%%"):
+            lines_out.append(line)
+            continue
+
+        # Aplică substituțiile caracter cu caracter
+        new_line = []
+        for ch in line:
+            new_line.append(_MERMAID_CHAR_MAP.get(ch, ch))
+        lines_out.append("".join(new_line))
+
+    sanitized = "\n".join(lines_out)
+
+    # Auto-citează etichetele de noduri care conțin caractere speciale
+    # Pattern: [text], {text}, (text) — dacă textul conține caractere non-ASCII simple
+    def quote_label(match):
+        bracket_open  = match.group(1)
+        content       = match.group(2)
+        bracket_close = match.group(3)
+        # Dacă are deja ghilimele sau e deja safe, lasă-l
+        if content.startswith('"') or content.startswith("'"):
+            return match.group(0)
+        # Citează dacă are caractere speciale (altele decât alfanumeric, spații, punct, virgulă, -, _)
+        if re.search(r'[^\w\s\.,\-_/\\+*=<>!?@#&|^~`]', content):
+            safe = content.replace('"', "'")
+            return f'{bracket_open}"{safe}"{bracket_close}'
+        return match.group(0)
+
+    sanitized = re.sub(r'(\[)([^\[\]]+)(\])', quote_label, sanitized)
+    sanitized = re.sub(r'(\{)([^\{\}]+)(\})', quote_label, sanitized)
+
+    return sanitized
+
+
+# Template HTML cu error handling JavaScript robust
+_MERMAID_HTML = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <style>
-  body {{ margin:0; padding:10px; background:{bg}; font-family: sans-serif; }}
-  .mermaid {{ max-width:100%; }}
-  svg {{ max-width:100%; height:auto; }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: {bg}; font-family: sans-serif; padding: 12px; }}
+  .mermaid {{ max-width: 100%; }}
+  svg {{ max-width: 100% !important; height: auto !important; }}
+  #error-box {{
+    display: none;
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 6px;
+    padding: 10px 14px;
+    color: #856404;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }}
 </style>
 </head>
 <body>
-<div class="mermaid">
-{code}
-</div>
+<div id="error-box"></div>
+<div class="mermaid" id="diagram">{code}</div>
 <script>
   mermaid.initialize({{
-    startOnLoad: true,
+    startOnLoad: false,
     theme: '{theme}',
     securityLevel: 'loose',
-    flowchart: {{ useMaxWidth: true, htmlLabels: true }},
-    er: {{ useMaxWidth: true }},
-    sequence: {{ useMaxWidth: true }},
+    flowchart: {{ useMaxWidth: true, htmlLabels: true, curve: 'basis' }},
+    er:         {{ useMaxWidth: true }},
+    sequence:   {{ useMaxWidth: true }},
+    logLevel:   'error',
   }});
+
+  async function renderDiagram() {{
+    try {{
+      await mermaid.run({{ nodes: [document.getElementById('diagram')] }});
+    }} catch(err) {{
+      const box = document.getElementById('error-box');
+      box.style.display = 'block';
+      box.textContent = '⚠️ Eroare diagrama: ' + err.message;
+      document.getElementById('diagram').style.display = 'none';
+      // Notifică Streamlit că a apărut o eroare (înălțime minimă)
+      window.parent.postMessage({{ type: 'mermaid-error', msg: err.message }}, '*');
+    }}
+  }}
+  renderDiagram();
 </script>
 </body>
-</html>
-"""
+</html>"""
+
 
 def render_mermaid(code: str, dark_mode: bool = False) -> bool:
-    """Randează o diagramă Mermaid.js într-un iframe HTML."""
-    try:
-        import streamlit.components.v1 as components
+    """
+    Randează o diagramă Mermaid.js într-un iframe HTML.
+    Sanitizează automat diacritice și simboluri matematice înainte de randare.
+    Fallback la ASCII art dacă sintaxa e irecuperabilă.
+    """
+    import streamlit.components.v1 as components
 
-        theme  = "dark"   if dark_mode else "default"
-        bg     = "#1e1e2e" if dark_mode else "#ffffff"
+    theme = "dark"    if dark_mode else "default"
+    bg    = "#1e1e2e" if dark_mode else "#ffffff"
 
-        html = _MERMAID_HTML.format(code=code.strip(), theme=theme, bg=bg)
+    # Pasul 1: sanitizare
+    clean_code = _sanitize_mermaid(code.strip())
 
-        # Estimăm înălțimea după numărul de linii
-        lines     = code.strip().count("\n") + 1
-        est_height = max(200, min(lines * 42 + 80, 700))
+    # Pasul 2: validare de bază — verifică că are cel puțin un tip cunoscut
+    first_line = clean_code.strip().split("\n")[0].strip().lower()
+    known_types = [
+        "flowchart", "graph", "sequencediagram", "classdiagram", "erdiagram",
+        "gantt", "pie", "timeline", "mindmap", "gitgraph", "statediagram",
+    ]
+    has_known_type = any(first_line.startswith(t) for t in known_types)
 
-        st.markdown('<div class="draw-label" style="margin-bottom:4px">📐 Diagramă Mermaid</div>',
-                    unsafe_allow_html=True)
-        components.html(html, height=est_height, scrolling=True)
-        return True
+    if not has_known_type:
+        # Încearcă să detecteze tipul și adaugă header dacă lipsește
+        if "-->" in clean_code or "---" in clean_code:
+            clean_code = "flowchart TD\n" + clean_code
+        elif ":" in clean_code and "\n" in clean_code:
+            clean_code = "graph TD\n" + clean_code
 
-    except Exception as e:
-        st.warning(f"⚠️ Eroare la diagrama Mermaid: {e}")
-        return False
+    html = _MERMAID_HTML.format(
+        code=clean_code,
+        theme=theme,
+        bg=bg,
+    )
+
+    # Estimăm înălțimea: 40px/linie + padding, max 700px
+    n_lines    = clean_code.count("\n") + 1
+    est_height = max(220, min(n_lines * 44 + 90, 700))
+
+    st.markdown(
+        '<div class="draw-label" style="margin-bottom:4px">📐 Diagramă Mermaid</div>',
+        unsafe_allow_html=True,
+    )
+    components.html(html, height=est_height, scrolling=True)
+    return True
 
 
 # ════════════════════════════════════════════════════════════
@@ -383,28 +533,48 @@ arbori genealogici, relații biologice, cronologii, organigrame, ERD.
 
 [[MERMAID]]
 flowchart TD
-    A[Start] --> B{Δ = b²-4ac}
-    B -->|Δ > 0| C[Două soluții reale]
-    B -->|Δ = 0| D[O soluție dublă]
-    B -->|Δ < 0| E[Fără soluții reale]
-    C --> F[x₁,₂ = -b ± √Δ / 2a]
+    A[Start] --> B{"discriminant = b^2 - 4ac"}
+    B -->|"Delta pozitiv"| C["Doua solutii reale"]
+    B -->|"Delta zero"| D["O solutie dubla"]
+    B -->|"Delta negativ"| E["Fara solutii reale"]
+    C --> F["x = -b +/- sqrt(Delta) / 2a"]
 [[/MERMAID]]
 
 Tipuri Mermaid disponibile:
 - `flowchart TD` / `LR` — diagrame flux (top-down / left-right)
-- `sequenceDiagram` — secvențe (biologie: sinteză proteică, reacții)
+- `sequenceDiagram` — secvențe (biologie: sinteza proteica, reactii)
 - `classDiagram` — clase (informatică OOP)
 - `erDiagram` — entitate-relație (baze de date)
 - `timeline` — cronologii (istorie)
 - `mindmap` — hărți mentale (recapitulări)
 - `graph` — grafuri generale
 
-REGULI Mermaid:
-- Nodurile cu text lung: folosește ghilimele "text lung"
-- Săgeți: --> (normal), ==> (gros), -.-> (punctat), -->|text| (cu etichetă)
-- Forme: [dreptunghi], (rotunjit), {romb/decizie}, ((cerc)), >paralelogram]
-- Nu folosi caractere speciale în noduri fără ghilimele (ă,â,î,ș,ț => scrie fara diacritice sau pune in ghilimele)
-- Testează că sintaxa e validă — evită noduri nedefinite
+REGULI CRITICE Mermaid — RESPECTĂ-LE SAU DIAGRAMA CREAZĂ EROARE:
+
+1. CARACTERE INTERZISE în noduri (cauzează "Syntax error in text"):
+   INTERZIS: ă â î ș ț Ă Â Î Ș Ț (diacritice românești)
+   INTERZIS: Δ α β γ π σ λ μ (litere grecești)
+   INTERZIS: ² ³ ₁ ₂ √ ± × ÷ ∞ (simboluri matematice unicode)
+   INTERZIS: → ← ⇒ ∈ ∑ ∫ (simboluri speciale)
+
+2. ÎNLOCUIRI OBLIGATORII:
+   ă→a, â→a, î→i, ș→s, ț→t (și majusculele)
+   Δ→Delta, π→pi, α→alpha, β→beta, σ→sigma
+   ²→^2, ³→^3, ₁→_1, ₂→_2, √→sqrt, ±→+/-
+
+3. GHILIMELE — FOLOSEȘTE-LE ÎNTOTDEAUNA pentru etichete noduri:
+   CORECT:   A["Doua solutii reale"]
+   CORECT:   B{"discriminant > 0"}
+   CORECT:   -->|"Delta pozitiv"|
+   GRESIT:   A[Două soluții reale]   ← EROARE SINTAXĂ!
+   GRESIT:   B{Δ > 0}               ← EROARE SINTAXĂ!
+
+4. REGULA DE AUR: Dacă nu ești 100% sigur că un caracter e ASCII simplu
+   (litere a-z, cifre 0-9, spațiu, punct, virgulă, paranteză) → PUNE ÎN GHILIMELE.
+
+5. Etichetele pe săgeți ÎNTOTDEAUNA în ghilimele: -->|"text"|
+6. Evită noduri nedefinite — fiecare nod folosit în săgeți trebuie definit
+7. Maximum 15 noduri per diagramă pentru claritate
 
 ━━━ 3. PLOTLY — date interactive ━━━
 Folosit pentru: statistică descriptivă, comparații de date,

@@ -225,23 +225,7 @@ st.markdown("""
 <style>
     .stChatMessage { font-size: 16px; }
     footer { visibility: hidden; }
-    .svg-container {
-        background-color: white;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #ddd;
-        text-align: center;
-        margin: 15px 0;
-        overflow: auto;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        max-width: 100%;
-    }
-    .svg-container svg { max-width: 100%; height: auto; }
-    [data-theme="dark"] .svg-container {
-        background-color: #1e1e2e;
-        border-color: #444;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.4);
-    }
+    /* Drawing containers handled by drawing module CSS */
     .typing-indicator {
         display: flex;
         align-items: center;
@@ -734,8 +718,8 @@ def clean_text_for_audio(text: str) -> str:
     text = re.sub(r'\*\*Pasul\s+(\d+)\s*[—–-]+\s*([^*]+)\*\*\s*:', r'Pasul \1. \2.', text)
     text = re.sub(r'\*\*(Ce avem|Ce căutăm|Rezolvare|Răspuns final|Reține)[:\s*]*\*\*', r'\1.', text)
     text = re.sub(r'[═=\-─]{3,}', ' ', text)
-    text = re.sub(r'\[\[DESEN_SVG\]\].*?\[\[/DESEN_SVG\]\]', ' Am desenat o figură pentru tine. ', text, flags=re.DOTALL)
-    text = re.sub(r'<svg.*?</svg>', ' ', text, flags=re.DOTALL)
+    # Clean all drawing blocks (Matplotlib/Mermaid/Plotly/ASCII) for TTS
+    text = clean_drawing_blocks_for_audio(text)
 
     for pattern, replacement in _UNIT_PATTERNS:
         text = pattern.sub(replacement, text)
@@ -818,133 +802,13 @@ def generate_professor_voice(text: str, voice: str = VOICE_MALE_RO) -> BytesIO:
         return None
 
 
-# === SVG FUNCTIONS ===
-try:
-    from lxml import etree as _lxml_etree
-    _LXML_AVAILABLE = True
-except ImportError:
-    _LXML_AVAILABLE = False
-
-
-def repair_svg(svg_content: str) -> str:
-    if not svg_content:
-        return None
-    svg_content = svg_content.strip()
-    has_svg_open  = bool(re.search(r'<svg[^>]*>', svg_content, re.IGNORECASE))
-    has_svg_close = '</svg>' in svg_content.lower()
-    if not has_svg_open:
-        svg_content = (
-            '<svg viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg" '
-            'style="max-width:100%;height:auto;background-color:white;">\n'
-            + svg_content + '\n</svg>'
-        )
-    elif has_svg_open and not has_svg_close:
-        svg_content += '\n</svg>'
-    if 'xmlns=' not in svg_content:
-        svg_content = svg_content.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"', 1)
-    if 'viewBox=' not in svg_content.lower():
-        svg_content = svg_content.replace('<svg', '<svg viewBox="0 0 800 600"', 1)
-    if _LXML_AVAILABLE:
-        try:
-            parser = _lxml_etree.XMLParser(recover=True, remove_comments=False,
-                                            resolve_entities=False, ns_clean=True)
-            root = _lxml_etree.fromstring(svg_content.encode("utf-8"), parser)
-            return _lxml_etree.tostring(root, pretty_print=True, encoding="unicode", xml_declaration=False)
-        except Exception:
-            pass
-    return repair_unclosed_tags(svg_content)
-
-
-def repair_unclosed_tags(svg_content: str) -> str:
-    self_closing_tags = ['path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'image', 'use']
-    for tag in self_closing_tags:
-        pattern = rf'<{tag}(\s[^>]*)?>(?!</{tag}>)'
-        def fix_tag(match, _tag=tag):
-            attrs = match.group(1) or ""
-            if attrs.rstrip().endswith('/'):
-                return match.group(0)
-            return f'<{_tag}{attrs}/>'
-        svg_content = re.sub(pattern, fix_tag, svg_content)
-    text_opens  = len(re.findall(r'<text[^>]*>', svg_content))
-    text_closes = len(re.findall(r'</text>', svg_content))
-    if text_opens > text_closes:
-        for _ in range(text_opens - text_closes):
-            svg_content = svg_content.replace('</svg>', '</text></svg>')
-    g_opens  = len(re.findall(r'<g[^>]*>', svg_content))
-    g_closes = len(re.findall(r'</g>', svg_content))
-    if g_opens > g_closes:
-        for _ in range(g_opens - g_closes):
-            svg_content = svg_content.replace('</svg>', '</g></svg>')
-    return svg_content
-
-
-def validate_svg(svg_content: str) -> tuple:
-    if not svg_content:
-        return False, "SVG gol"
-    visual_elements = ['path', 'rect', 'circle', 'ellipse', 'line', 'text', 'polygon', 'polyline', 'image']
-    if _LXML_AVAILABLE:
-        try:
-            parser = _lxml_etree.XMLParser(recover=True)
-            _lxml_etree.fromstring(svg_content.encode("utf-8"), parser)
-            has_content = any(f'<{el}' in svg_content.lower() for el in visual_elements)
-            if not has_content:
-                return False, "SVG fără elemente vizuale"
-            return True, "OK"
-        except Exception:
-            pass
-    if '<svg' not in svg_content.lower():
-        return False, "Lipsește tag-ul <svg>"
-    if '</svg>' not in svg_content.lower():
-        return False, "Lipsește tag-ul </svg>"
-    has_content = any(f'<{elem}' in svg_content.lower() for elem in visual_elements)
-    if not has_content:
-        return False, "SVG fără elemente vizuale"
-    return True, "OK"
-
-
-def render_message_with_svg(content: str):
-    has_svg_markers  = '[[DESEN_SVG]]' in content or '<svg' in content.lower()
-    has_svg_elements = any(tag in content.lower() for tag in ['<path', '<rect', '<circle', '<line', '<polygon'])
-    if has_svg_markers or (has_svg_elements and 'stroke=' in content):
-        svg_code = None
-        before_text = ""
-        after_text = ""
-        if '[[DESEN_SVG]]' in content:
-            parts = content.split('[[DESEN_SVG]]')
-            before_text = parts[0]
-            if len(parts) > 1 and '[[/DESEN_SVG]]' in parts[1]:
-                inner_parts = parts[1].split('[[/DESEN_SVG]]')
-                svg_code = inner_parts[0]
-                after_text = inner_parts[1] if len(inner_parts) > 1 else ""
-            elif len(parts) > 1:
-                svg_code = parts[1]
-        elif '<svg' in content.lower():
-            svg_match = re.search(r'<svg.*?</svg>', content, re.DOTALL | re.IGNORECASE)
-            if svg_match:
-                svg_code = svg_match.group(0)
-                before_text = content[:svg_match.start()]
-                after_text = content[svg_match.end():]
-            else:
-                svg_start = content.lower().find('<svg')
-                if svg_start != -1:
-                    before_text = content[:svg_start]
-                    svg_code = content[svg_start:]
-        if svg_code:
-            svg_code = repair_svg(svg_code)
-            is_valid, error = validate_svg(svg_code)
-            if is_valid:
-                if before_text.strip():
-                    st.markdown(before_text.strip())
-                st.markdown(f'<div class="svg-container">{svg_code}</div>', unsafe_allow_html=True)
-                if after_text.strip():
-                    st.markdown(after_text.strip())
-                return
-            else:
-                st.warning(f"⚠️ Desenul nu a putut fi afișat corect: {error}")
-    clean_content = content
-    clean_content = re.sub(r'\[\[DESEN_SVG\]\]', '\n🎨 *Desen:*\n', clean_content)
-    clean_content = re.sub(r'\[\[/DESEN_SVG\]\]', '\n', clean_content)
-    st.markdown(clean_content)
+# === DRAWING MODULE (Matplotlib / Mermaid / Plotly / ASCII) ===
+# Replaces SVG completely. Auto-selects library based on content type.
+from drawing_module import (
+    render_message,
+    clean_drawing_blocks_for_audio,
+    DRAWING_SYSTEM_PROMPT,
+)
 
 
 # === INIȚIALIZARE ===
@@ -1059,7 +923,7 @@ MATERII = {
 
 
 def get_system_prompt(materie: str | None = None, pas_cu_pas: bool = False,
-                      desen_fizica: bool = True, mod_strategie: bool = False,
+                      mod_strategie: bool = False,
                       mod_bac_intensiv: bool = False, mod_avansat: bool = False) -> str:
 
     if materie:
@@ -1136,14 +1000,6 @@ def get_system_prompt(materie: str | None = None, pas_cu_pas: bool = False,
     ═══════════════════════════════════════════════════
 """ if mod_avansat else ""
 
-    desen_fizica_bloc = r"""
-       DESENARE ÎN FIZICĂ (DOAR LA CERERE EXPLICITĂ):
-       Folosește tag-urile [[DESEN_SVG]]..[[/DESEN_SVG]] pentru orice desen cerut.
-       Corp = dreptunghi gri, Forțe = săgeți colorate cu etichete.
-""" if desen_fizica else r"""
-       DESENARE FIZICĂ: dezactivată — NU genera desene SVG automat.
-"""
-
     return f"""
 ROL: {rol_line}
 {pas_cu_pas_bloc}{mod_strategie_bloc}{mod_bac_intensiv_bloc}{mod_avansat_bloc}
@@ -1155,11 +1011,7 @@ ROL: {rol_line}
     Notații: f'(x) pentru derivată, ln(x) pentru log natural, lg(x) pentru log zecimal,
              tg(x) pentru tangentă, ctg(x) pentru cotangentă.
 
-    DESENARE SVG: Când elevul cere un desen, generează cod SVG valid între:
-    [[DESEN_SVG]]
-    <svg viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">...</svg>
-    [[/DESEN_SVG]]
-{desen_fizica_bloc}"""
+{DRAWING_SYSTEM_PROMPT}"""
 
 
 # === DETECȚIE AUTOMATĂ MATERIE ===
@@ -1240,7 +1092,6 @@ def update_system_prompt_for_subject(materie: str | None):
         materie=materie,
         pas_cu_pas=st.session_state.get("pas_cu_pas", False),
         mod_avansat=st.session_state.get("mod_avansat", False),
-        desen_fizica=st.session_state.get("desen_fizica", True),
         mod_strategie=st.session_state.get("mod_strategie", False),
         mod_bac_intensiv=st.session_state.get("mod_bac_intensiv", False),
     )
@@ -1257,7 +1108,6 @@ safety_settings = [
 SYSTEM_PROMPT = get_system_prompt(
     pas_cu_pas=st.session_state.get("pas_cu_pas", False),
     mod_avansat=st.session_state.get("mod_avansat", False),
-    desen_fizica=False,
 )
 
 
@@ -2055,7 +1905,6 @@ with st.sidebar:
             materie_selectata,
             pas_cu_pas=st.session_state.get("pas_cu_pas", False),
             mod_avansat=st.session_state.get("mod_avansat", False),
-            desen_fizica=st.session_state.get("desen_fizica", True),
             mod_strategie=st.session_state.get("mod_strategie", False),
             mod_bac_intensiv=st.session_state.get("mod_bac_intensiv", False),
         )
@@ -2082,7 +1931,6 @@ with st.sidebar:
             st.session_state.get("materie_selectata"),
             pas_cu_pas=pas_cu_pas,
             mod_avansat=st.session_state.get("mod_avansat", False),
-            desen_fizica=st.session_state.get("desen_fizica", True),
             mod_strategie=st.session_state.get("mod_strategie", False),
             mod_bac_intensiv=st.session_state.get("mod_bac_intensiv", False),
         )
@@ -2103,7 +1951,6 @@ with st.sidebar:
             st.session_state.get("materie_selectata"),
             pas_cu_pas=st.session_state.get("pas_cu_pas", False),
             mod_avansat=st.session_state.get("mod_avansat", False),
-            desen_fizica=st.session_state.get("desen_fizica", True),
             mod_strategie=mod_strategie,
             mod_bac_intensiv=st.session_state.get("mod_bac_intensiv", False),
         )
@@ -2124,7 +1971,6 @@ with st.sidebar:
             st.session_state.get("materie_selectata"),
             pas_cu_pas=st.session_state.get("pas_cu_pas", False),
             mod_avansat=mod_avansat,
-            desen_fizica=st.session_state.get("desen_fizica", True),
             mod_strategie=st.session_state.get("mod_strategie", False),
             mod_bac_intensiv=st.session_state.get("mod_bac_intensiv", False),
         )
@@ -2145,7 +1991,6 @@ with st.sidebar:
             st.session_state.get("materie_selectata"),
             pas_cu_pas=st.session_state.get("pas_cu_pas", False),
             mod_avansat=st.session_state.get("mod_avansat", False),
-            desen_fizica=st.session_state.get("desen_fizica", True),
             mod_strategie=st.session_state.get("mod_strategie", False),
             mod_bac_intensiv=mod_bac_intensiv,
         )
@@ -2155,7 +2000,6 @@ with st.sidebar:
     if st.session_state.get("mod_bac_intensiv"):
         st.info("🎓 **BAC Intensiv activ** — focusat pe ce pică la examen.", icon="📝")
 
-    desen_fizica = False  # dezactivat by default — elevul cere explicit
 
     st.divider()
 
@@ -2380,7 +2224,7 @@ if st.session_state.get("pas_cu_pas"):
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         if msg["role"] == "assistant":
-            render_message_with_svg(msg["content"])
+            render_message(msg["content"], dark_mode=st.session_state.get("dark_mode", False))
         else:
             st.markdown(msg["content"])
 
@@ -2436,7 +2280,7 @@ if st.session_state.get("_quick_action"):
                     full_response += text_chunk
                     message_placeholder.markdown(full_response + "▌")
                 message_placeholder.empty()
-                render_message_with_svg(full_response)
+                render_message(full_response, dark_mode=st.session_state.get("dark_mode", False))
                 st.session_state.messages.append({"role": "assistant", "content": full_response})
                 save_message_with_limits(st.session_state.session_id, "assistant", full_response)
             except Exception as e:
@@ -2475,7 +2319,7 @@ if st.session_state.get("_suggested_question"):
                 full_response += text_chunk
                 message_placeholder.markdown(full_response + "▌")
             message_placeholder.empty()
-            render_message_with_svg(full_response)
+            render_message(full_response, dark_mode=st.session_state.get("dark_mode", False))
             st.session_state.messages.append({"role": "assistant", "content": full_response})
             save_message_with_limits(st.session_state.session_id, "assistant", full_response)
         except Exception as e:
@@ -2667,7 +2511,7 @@ if user_input := st.chat_input("Întreabă profesorul..."):
                     message_placeholder.markdown(full_response + "▌")
 
             message_placeholder.empty()
-            render_message_with_svg(full_response)
+            render_message(full_response, dark_mode=st.session_state.get("dark_mode", False))
 
             st.session_state.messages.append({"role": "assistant", "content": full_response})
             save_message_with_limits(st.session_state.session_id, "assistant", full_response)
